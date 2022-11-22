@@ -8,38 +8,73 @@ terraform {
   required_version = "1.3.4"
 }
 
-# Create Virtual Network
+#------------------------------
+# Azure Virtual Network (vnet)
+#------------------------------
 resource "azurerm_virtual_network" "vnet" {
-  name                = var.vnet_name
   address_space       = var.address_space
-  location            = var.location
+  location            = var.vnet_location
+  name                = var.vnet_name
   resource_group_name = var.resource_group_name
+  dns_servers         = var.dns_servers
   tags                = var.tags
 
-  lifecycle {
-    ignore_changes = [
-      tags
-    ]
+  dynamic "ddos_protection_plan" {
+    for_each = var.ddos_protection_plan != null ? [var.ddos_protection_plan] : []
+
+    content {
+      enable = ddos_protection_plan.value.enable
+      id     = ddos_protection_plan.value.id
+    }
   }
 }
 
-# Create Subnet
 resource "azurerm_subnet" "subnet" {
-  for_each                                       = var.subnets
-  name                                           = each.value.subnet_name
+  count = length(var.subnet_names)
+
+  address_prefixes                               = [var.subnet_prefixes[count.index]]
+  name                                           = var.subnet_names[count.index]
   resource_group_name                            = var.resource_group_name
   virtual_network_name                           = azurerm_virtual_network.vnet.name
-  address_prefixes                               = each.value.subnet_address_prefixes
-  service_endpoints                              = lookup(each.value, "service_endpoints", [])
+  service_endpoints                              = lookup(var.subnet_service_endpoints, var.subnet_names[count.index], null)
 
   dynamic "delegation" {
-    for_each = lookup(each.value, "delegation", {}) != {} ? [1] : []
+    for_each = lookup(var.subnet_delegation, var.subnet_names[count.index], {})
+
     content {
-      name = lookup(each.value.delegation, "name", null)
+      name = delegation.key
+
       service_delegation {
-        name    = lookup(each.value.delegation.service_delegation, "name", null)
-        actions = lookup(each.value.delegation.service_delegation, "actions", null)
+        name    = lookup(delegation.value, "service_name")
+        actions = lookup(delegation.value, "service_actions", [])
       }
     }
   }
+}
+
+locals {
+  azurerm_subnets = {
+    for index, subnet in azurerm_subnet.subnet :
+    subnet.name => subnet.id
+  }
+}
+
+#--------------------------
+# Subnet & NSG Association
+#--------------------------
+resource "azurerm_subnet_network_security_group_association" "vnet" {
+  for_each = var.nsg_ids
+
+  network_security_group_id = each.value
+  subnet_id                 = local.azurerm_subnets[each.key] 
+}
+
+#--------------------------
+# Subnet & UDR Association
+#--------------------------
+resource "azurerm_subnet_route_table_association" "vnet" {
+  for_each = var.route_tables_ids
+
+  route_table_id = each.value
+  subnet_id      = local.azurerm_subnets[each.key]
 }
